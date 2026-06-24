@@ -1,0 +1,14 @@
+scratch/
+*.db
+node_modules/
+dist/
+bin/
+web/dist/
+
+# runtime data + secrets (not source)
+/data/
+.token
+.port
+srv.log
+srv.pid
+tsconfig.tsbuildinfo
