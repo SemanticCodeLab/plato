@@ -434,3 +434,47 @@ textarea {
   font-size: 0.8rem;
   color: var(--muted);
 }
+
+/* ---- link graph ---- */
+.graph-node {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.graph-node > div:first-child {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+.graph-edges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+.edge-chip {
+  font-size: 0.75rem;
+  font-family: ui-monospace, Menlo, monospace;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.05rem 0.4rem;
+}
+
+/* ---- add/remove link controls ---- */
+.add-link {
+  display: flex;
+  gap: 0.4rem;
+  margin-top: 0.5rem;
+}
+.add-link input {
+  flex: 1;
+  font-size: 0.8rem;
+}
+.link-remove {
+  margin-left: 0.4rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.link-remove:hover {
+  color: var(--missing);
+}

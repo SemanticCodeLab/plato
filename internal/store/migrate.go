@@ -8,7 +8,7 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 // migrate applies the base schema then incremental column additions. Both the
 // base schema and the ALTERs are written to be idempotent so this is safe to run
@@ -28,6 +28,16 @@ func (db *DB) migrate() error {
 		`ALTER TABLE wikis ADD COLUMN last_indexed_at TEXT`,
 	}
 	for _, stmt := range v2 {
+		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
+			return err
+		}
+	}
+
+	// v3: link origin (auto-discovered vs manually added via the API).
+	v3 := []string{
+		`ALTER TABLE links ADD COLUMN origin TEXT NOT NULL DEFAULT 'auto'`,
+	}
+	for _, stmt := range v3 {
 		if _, err := db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
 			return err
 		}

@@ -3,6 +3,7 @@ package wiki
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/plato/plato/internal/store"
@@ -106,6 +107,64 @@ func TestPageBrokenLinks(t *testing.T) {
 	broken, _ = s.PageBrokenLinks(w, "New.md", "# New\n[[Database]]\n")
 	if len(broken) != 0 {
 		t.Errorf("expected 0 broken, got %d", len(broken))
+	}
+}
+
+func TestAddForwardLinkAndOriginSurvivesReindex(t *testing.T) {
+	s := newSvc(t)
+	w, _ := s.CreateWiki("demo", "Demo")
+	_, _ = s.CreatePage(w, "Database", "Database.md", "# Database\n")
+	from, _ := s.CreatePage(w, "Auth", "Auth.md", "# Auth\n")
+
+	// Add an explicit forward link Auth -> Database by slug.
+	if _, err := s.AddForwardLink(w, from.Slug, AddLinkSpec{ToSlug: "database"}); err != nil {
+		t.Fatal(err)
+	}
+	links, _ := s.DB.OutgoingLinks(from.ID)
+	if len(links) != 1 || links[0].Status != store.StatusResolved {
+		t.Fatalf("expected 1 resolved link, got %+v", links)
+	}
+	if links[0].Origin != store.OriginManual {
+		t.Errorf("expected manual origin, got %q", links[0].Origin)
+	}
+
+	// File should contain the managed Related section.
+	pwc, _ := s.GetPage(w, from.Slug)
+	if !strings.Contains(pwc.Content, "## Related") || !strings.Contains(pwc.Content, "[[database]]") {
+		t.Errorf("link not written into file:\n%s", pwc.Content)
+	}
+
+	// Reindex from file — manual origin must survive.
+	_ = s.ResolveWikiLinks(w)
+	links, _ = s.DB.OutgoingLinks(from.ID)
+	if len(links) != 1 || links[0].Origin != store.OriginManual {
+		t.Errorf("manual origin lost after reindex: %+v", links)
+	}
+
+	// Remove it.
+	if _, err := s.RemoveForwardLink(w, from.Slug, "[[database]]"); err != nil {
+		t.Fatal(err)
+	}
+	links, _ = s.DB.OutgoingLinks(from.ID)
+	if len(links) != 0 {
+		t.Errorf("expected link removed, got %+v", links)
+	}
+}
+
+func TestGraph(t *testing.T) {
+	s := newSvc(t)
+	w, _ := s.CreateWiki("demo", "Demo")
+	_, _ = s.CreatePage(w, "B", "B.md", "# B\n")
+	_, _ = s.CreatePage(w, "A", "A.md", "# A\n[[B]]\n")
+	nodes, edges, err := s.DB.Graph(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 {
+		t.Errorf("nodes = %d, want 2", len(nodes))
+	}
+	if len(edges) != 1 {
+		t.Errorf("edges = %d, want 1 (%+v)", len(edges), edges)
 	}
 }
 

@@ -65,7 +65,28 @@ export interface LinkView {
   label?: string;
   kind: string;
   status: string;
+  origin: string;
   to_slug?: string;
+}
+
+export interface GraphNode {
+  id: number;
+  slug: string;
+  title: string;
+  rel_path: string;
+  outgoing: number;
+  backlinks: number;
+}
+export interface GraphEdge {
+  from: number;
+  to: number;
+  kind: string;
+  origin: string;
+}
+export interface Graph {
+  wiki: string;
+  nodes: GraphNode[];
+  edges: GraphEdge[];
 }
 export interface Backlink {
   from_slug: string;
@@ -150,6 +171,23 @@ export const api = {
       { content, base_hash }
     ),
   verify: (wiki: string) => req<VerifyReport>("GET", `/api/v1/wikis/${wiki}/verify`),
+  graph: (wiki: string) => req<Graph>("GET", `/api/v1/wikis/${wiki}/graph`),
+  addLink: (
+    wiki: string,
+    pageSlug: string,
+    body: { to?: string; to_path?: string; to_title?: string; label?: string }
+  ) =>
+    req<{ outgoing: LinkView[] }>(
+      "POST",
+      `/api/v1/wikis/${wiki}/pages/${pageSlug}/links`,
+      body
+    ),
+  removeLink: (wiki: string, pageSlug: string, raw: string) =>
+    req<{ removed: boolean }>(
+      "DELETE",
+      `/api/v1/wikis/${wiki}/pages/${pageSlug}/links`,
+      { raw }
+    ),
   deletePage: (wiki: string, slug: string) =>
     req<{ deleted: boolean }>("DELETE", `/api/v1/wikis/${wiki}/pages/${slug}`),
   pageLinks: (wiki: string, slug: string) =>

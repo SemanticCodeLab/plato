@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS links (
   label TEXT,
   kind TEXT NOT NULL,
   status TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT 'auto',
   created_at TEXT NOT NULL,
   FOREIGN KEY(wiki_id) REFERENCES wikis(id),
   FOREIGN KEY(from_page_id) REFERENCES pages(id),

@@ -10,6 +10,9 @@ const (
 
 	KindWiki     = "wiki"
 	KindRelative = "relative"
+
+	OriginAuto   = "auto"   // discovered from page content
+	OriginManual = "manual" // added explicitly via the link API
 )
 
 // Link is one outgoing cross-link from a page.
@@ -23,6 +26,7 @@ type Link struct {
 	Label      sql.NullString
 	Kind       string
 	Status     string
+	Origin     string
 	CreatedAt  string
 }
 
@@ -33,6 +37,7 @@ type LinkView struct {
 	Label  string `json:"label,omitempty"`
 	Kind   string `json:"kind"`
 	Status string `json:"status"`
+	Origin string `json:"origin"`
 	ToSlug string `json:"to_slug,omitempty"`
 }
 
@@ -50,19 +55,22 @@ func (db *DB) DeleteLinksFrom(fromPageID int64) error {
 	return err
 }
 
-// InsertLink records one outgoing link.
+// InsertLink records one outgoing link. Origin defaults to auto when unset.
 func (db *DB) InsertLink(l Link) error {
+	if l.Origin == "" {
+		l.Origin = OriginAuto
+	}
 	_, err := db.Exec(
-		`INSERT INTO links (wiki_id, from_page_id, to_page_id, target, raw, label, kind, status, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		l.WikiID, l.FromPageID, l.ToPageID, l.Target, l.Raw, l.Label, l.Kind, l.Status, now())
+		`INSERT INTO links (wiki_id, from_page_id, to_page_id, target, raw, label, kind, status, origin, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		l.WikiID, l.FromPageID, l.ToPageID, l.Target, l.Raw, l.Label, l.Kind, l.Status, l.Origin, now())
 	return err
 }
 
 // OutgoingLinks returns enriched outgoing links for a page.
 func (db *DB) OutgoingLinks(fromPageID int64) ([]LinkView, error) {
 	rows, err := db.Query(
-		`SELECT l.raw, l.target, l.label, l.kind, l.status, p.slug
+		`SELECT l.raw, l.target, l.label, l.kind, l.status, l.origin, p.slug
 		   FROM links l LEFT JOIN pages p ON p.id = l.to_page_id
 		  WHERE l.from_page_id = ? ORDER BY l.id`, fromPageID)
 	if err != nil {
@@ -73,7 +81,7 @@ func (db *DB) OutgoingLinks(fromPageID int64) ([]LinkView, error) {
 	for rows.Next() {
 		var lv LinkView
 		var label, slug sql.NullString
-		if err := rows.Scan(&lv.Raw, &lv.Target, &label, &lv.Kind, &lv.Status, &slug); err != nil {
+		if err := rows.Scan(&lv.Raw, &lv.Target, &label, &lv.Kind, &lv.Status, &lv.Origin, &slug); err != nil {
 			return nil, err
 		}
 		lv.Label = label.String
@@ -100,6 +108,35 @@ func (db *DB) Backlinks(toPageID int64) ([]Backlink, error) {
 			return nil, err
 		}
 		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// MarkLinkManual flags the matching link(s) from a page as manual origin.
+func (db *DB) MarkLinkManual(fromPageID int64, kind, target string) error {
+	_, err := db.Exec(
+		`UPDATE links SET origin = ? WHERE from_page_id = ? AND kind = ? AND target = ?`,
+		OriginManual, fromPageID, kind, target)
+	return err
+}
+
+// ManualLinkKeys returns the set of (kind|target) keys for links from a page that
+// were added manually, so reindex can re-tag the rediscovered rows as manual.
+func (db *DB) ManualLinkKeys(fromPageID int64) (map[string]bool, error) {
+	rows, err := db.Query(
+		`SELECT kind, target FROM links WHERE from_page_id = ? AND origin = ?`,
+		fromPageID, OriginManual)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var kind, target string
+		if err := rows.Scan(&kind, &target); err != nil {
+			return nil, err
+		}
+		out[kind+"|"+target] = true
 	}
 	return out, rows.Err()
 }
@@ -180,6 +217,67 @@ func (db *DB) PageCountsInWiki(wikiID int64) (map[int64]*PageLinkCounts, error) 
 		get(id).Backlinks = n
 	}
 	return out, rows2.Err()
+}
+
+// GraphNode is one page in the project link graph.
+type GraphNode struct {
+	ID       int64  `json:"id"`
+	Slug     string `json:"slug"`
+	Title    string `json:"title"`
+	RelPath  string `json:"rel_path"`
+	Outgoing int    `json:"outgoing"`  // resolved outgoing edges
+	Backlinks int   `json:"backlinks"` // resolved inbound edges
+}
+
+// GraphEdge is one resolved link between two pages.
+type GraphEdge struct {
+	From   int64  `json:"from"`
+	To     int64  `json:"to"`
+	Kind   string `json:"kind"`
+	Origin string `json:"origin"`
+}
+
+// Graph returns the resolved-link graph for a wiki: every live page as a node and
+// every resolved outgoing link as an edge. Intended for external agent analysis.
+func (db *DB) Graph(wikiID int64) ([]GraphNode, []GraphEdge, error) {
+	pages, err := db.ListPages(wikiID)
+	if err != nil {
+		return nil, nil, err
+	}
+	counts, err := db.PageCountsInWiki(wikiID)
+	if err != nil {
+		return nil, nil, err
+	}
+	nodes := make([]GraphNode, 0, len(pages))
+	for _, p := range pages {
+		c := counts[p.ID]
+		n := GraphNode{ID: p.ID, Slug: p.Slug, Title: p.Title, RelPath: p.RelPath}
+		if c != nil {
+			n.Outgoing = c.Outgoing
+			n.Backlinks = c.Backlinks
+		}
+		nodes = append(nodes, n)
+	}
+
+	rows, err := db.Query(
+		`SELECT from_page_id, to_page_id, kind, origin
+		   FROM links
+		  WHERE wiki_id = ? AND status = ? AND to_page_id IS NOT NULL
+		  ORDER BY from_page_id, to_page_id`,
+		wikiID, StatusResolved)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	edges := []GraphEdge{}
+	for rows.Next() {
+		var e GraphEdge
+		if err := rows.Scan(&e.From, &e.To, &e.Kind, &e.Origin); err != nil {
+			return nil, nil, err
+		}
+		edges = append(edges, e)
+	}
+	return nodes, edges, rows.Err()
 }
 
 // BrokenLink is an unresolved (missing/ambiguous) cross-reference, with its

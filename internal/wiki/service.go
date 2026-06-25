@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -412,8 +413,212 @@ func (s *Service) PageBrokenLinks(w *store.Wiki, fromRelPath, content string) ([
 	return broken, nil
 }
 
+// relatedHeading is the managed section appended links are placed under.
+const relatedHeading = "## Related"
+
+// AddLinkSpec describes a link to add. Exactly one target form is used, in
+// priority order: Slug, RelPath, Title.
+type AddLinkSpec struct {
+	ToSlug  string
+	ToPath  string
+	ToTitle string
+	Label   string
+}
+
+// AddForwardLink adds a link from page `fromSlug` to the target, by writing it
+// into the source page's Markdown (under a managed "## Related" section) and
+// marking the resulting link manual. Returns the updated page.
+//
+// Adding a backlink "into B from A" is the same operation with fromSlug=A,
+// target=B — backlinks remain a derived view of forward links.
+func (s *Service) AddForwardLink(w *store.Wiki, fromSlug string, spec AddLinkSpec) (*store.Page, error) {
+	from, err := s.DB.PageBySlug(w.ID, fromSlug)
+	if err != nil {
+		return nil, err
+	}
+	if from == nil {
+		return nil, ErrNotFound
+	}
+	linkText, kind, target, err := s.renderLink(w, from, spec)
+	if err != nil {
+		return nil, err
+	}
+
+	abs, err := AbsPath(w.RootPath, from.RelPath)
+	if err != nil {
+		return nil, err
+	}
+	content, _, err := ReadFile(abs)
+	if err != nil {
+		return nil, err
+	}
+	newContent := appendRelated(string(content), linkText)
+	hash, err := WriteFileAtomic(abs, []byte(newContent))
+	if err != nil {
+		return nil, err
+	}
+	if err := s.DB.UpdatePage(from.ID, from.Slug, from.Title, hash); err != nil {
+		return nil, err
+	}
+	// Reindex, then mark this specific link manual so it survives future reindexes.
+	from, _ = s.DB.PageByID(from.ID)
+	if err := s.ReindexPage(w, from, newContent); err != nil {
+		return nil, err
+	}
+	if err := s.DB.MarkLinkManual(from.ID, kind, target); err != nil {
+		return nil, err
+	}
+	return from, nil
+}
+
+// RemoveForwardLink removes a previously added link bullet (matching linkText)
+// from the source page's "## Related" section and reindexes. linkText is the raw
+// markdown of the link (e.g. "[[database]]" or "[label](./x.md)").
+func (s *Service) RemoveForwardLink(w *store.Wiki, fromSlug, linkText string) (*store.Page, error) {
+	from, err := s.DB.PageBySlug(w.ID, fromSlug)
+	if err != nil {
+		return nil, err
+	}
+	if from == nil {
+		return nil, ErrNotFound
+	}
+	abs, err := AbsPath(w.RootPath, from.RelPath)
+	if err != nil {
+		return nil, err
+	}
+	content, _, err := ReadFile(abs)
+	if err != nil {
+		return nil, err
+	}
+	newContent := removeRelatedBullet(string(content), linkText)
+	if newContent == string(content) {
+		return nil, ErrNotFound // nothing removed
+	}
+	hash, err := WriteFileAtomic(abs, []byte(newContent))
+	if err != nil {
+		return nil, err
+	}
+	if err := s.DB.UpdatePage(from.ID, from.Slug, from.Title, hash); err != nil {
+		return nil, err
+	}
+	from, _ = s.DB.PageByID(from.ID)
+	if err := s.ReindexPage(w, from, newContent); err != nil {
+		return nil, err
+	}
+	return from, nil
+}
+
+// removeRelatedBullet deletes the "- <linkText>" line if present.
+func removeRelatedBullet(content, linkText string) string {
+	bullet := "- " + linkText
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		if strings.TrimSpace(ln) == bullet {
+			continue
+		}
+		out = append(out, ln)
+	}
+	return strings.Join(out, "\n")
+}
+
+// renderLink turns an AddLinkSpec into Markdown link text plus its (kind,target)
+// as they will appear in the link index.
+func (s *Service) renderLink(w *store.Wiki, from *store.Page, spec AddLinkSpec) (text, kind, target string, err error) {
+	switch {
+	case spec.ToTitle != "":
+		// Wikilink by title.
+		if spec.Label != "" {
+			return "[[" + spec.ToTitle + "|" + spec.Label + "]]", store.KindWiki, spec.ToTitle, nil
+		}
+		return "[[" + spec.ToTitle + "]]", store.KindWiki, spec.ToTitle, nil
+	case spec.ToPath != "":
+		clean, err := CleanRelPath(spec.ToPath)
+		if err != nil {
+			return "", "", "", err
+		}
+		rel := relPathFrom(from.RelPath, clean)
+		label := spec.Label
+		if label == "" {
+			label = clean
+		}
+		return "[" + label + "](" + rel + ")", store.KindRelative, rel, nil
+	case spec.ToSlug != "":
+		// Resolve slug to a page; emit a wikilink by slug (stable identifier).
+		tp, err := s.DB.PageBySlug(w.ID, spec.ToSlug)
+		if err != nil {
+			return "", "", "", err
+		}
+		if tp == nil {
+			return "", "", "", ErrNotFound
+		}
+		if spec.Label != "" {
+			return "[[" + tp.Slug + "|" + spec.Label + "]]", store.KindWiki, tp.Slug, nil
+		}
+		return "[[" + tp.Slug + "]]", store.KindWiki, tp.Slug, nil
+	default:
+		return "", "", "", ErrBadInput
+	}
+}
+
+// appendRelated adds linkText as a bullet under a managed "## Related" section,
+// creating the section if absent and avoiding duplicate bullets.
+func appendRelated(content, linkText string) string {
+	bullet := "- " + linkText
+	if strings.Contains(content, bullet) {
+		return content // already present
+	}
+	trimmed := strings.TrimRight(content, "\n")
+	if strings.Contains(content, relatedHeading) {
+		return trimmed + "\n" + bullet + "\n"
+	}
+	return trimmed + "\n\n" + relatedHeading + "\n" + bullet + "\n"
+}
+
+// relPathFrom computes a relative link path from a source page to a target path,
+// operating on slash-separated rel_paths.
+func relPathFrom(fromRel, toRel string) string {
+	fromDir := path.Dir(fromRel)
+	if fromDir == "." {
+		fromDir = ""
+	}
+	rel := pathRel(fromDir, toRel)
+	// Ensure a leading "./" for same-dir links so it reads as relative.
+	if !strings.HasPrefix(rel, ".") {
+		rel = "./" + rel
+	}
+	return rel
+}
+
+// pathRel returns toRel expressed relative to baseDir (both slash-separated,
+// project-root-relative). Falls back to toRel if it cannot compute.
+func pathRel(baseDir, toRel string) string {
+	if baseDir == "" {
+		return toRel
+	}
+	baseParts := strings.Split(baseDir, "/")
+	toParts := strings.Split(toRel, "/")
+	// drop common prefix
+	i := 0
+	for i < len(baseParts) && i < len(toParts)-1 && baseParts[i] == toParts[i] {
+		i++
+	}
+	var out []string
+	for j := i; j < len(baseParts); j++ {
+		out = append(out, "..")
+	}
+	out = append(out, toParts[i:]...)
+	return strings.Join(out, "/")
+}
+
 // ReindexPage parses content's links and rewrites this page's outgoing link rows.
+// Links previously marked manual are re-tagged manual when rediscovered, so the
+// auto/manual origin survives reindexing.
 func (s *Service) ReindexPage(w *store.Wiki, p *store.Page, content string) error {
+	manual, err := s.DB.ManualLinkKeys(p.ID)
+	if err != nil {
+		return err
+	}
 	if err := s.DB.DeleteLinksFrom(p.ID); err != nil {
 		return err
 	}
@@ -429,6 +634,10 @@ func (s *Service) ReindexPage(w *store.Wiki, p *store.Page, content string) erro
 			Raw:        ref.Raw,
 			Kind:       ref.Kind,
 			Status:     res.Status,
+			Origin:     store.OriginAuto,
+		}
+		if manual[ref.Kind+"|"+ref.Target] {
+			l.Origin = store.OriginManual
 		}
 		if ref.Label != "" {
 			l.Label.String, l.Label.Valid = ref.Label, true

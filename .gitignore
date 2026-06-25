@@ -12,3 +12,4 @@ web/dist/
 srv.log
 srv.pid
 tsconfig.tsbuildinfo
+docs/

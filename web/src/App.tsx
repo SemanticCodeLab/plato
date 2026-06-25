@@ -17,6 +17,8 @@ import {
   Backlink,
   SourceType,
   BrokenLink,
+  GraphNode,
+  GraphEdge,
 } from "./api";
 
 type View =
@@ -24,6 +26,7 @@ type View =
   | { name: "newProject" }
   | { name: "pages"; wiki: string }
   | { name: "verify"; wiki: string }
+  | { name: "graph"; wiki: string }
   | { name: "page"; wiki: string; slug: string }
   | { name: "edit"; wiki: string; slug: string }
   | { name: "new"; wiki: string }
@@ -60,6 +63,7 @@ export default function App() {
         {view.name === "newProject" && <NewProject nav={setView} />}
         {view.name === "pages" && <Pages wiki={view.wiki} nav={setView} />}
         {view.name === "verify" && <Verify wiki={view.wiki} nav={setView} />}
+        {view.name === "graph" && <GraphView wiki={view.wiki} nav={setView} />}
         {view.name === "page" && (
           <PageView wiki={view.wiki} slug={view.slug} nav={setView} />
         )}
@@ -488,6 +492,7 @@ function Pages({ wiki, nav }: { wiki: string; nav: (v: View) => void }) {
           onChange={(e) => setQ(e.target.value)}
         />
         <button onClick={() => nav({ name: "verify", wiki })}>Verify links</button>
+        <button onClick={() => nav({ name: "graph", wiki })}>Graph</button>
         <button onClick={() => nav({ name: "new", wiki })}>+ New page</button>
       </div>
 
@@ -597,6 +602,94 @@ function Verify({ wiki, nav }: { wiki: string; nav: (v: View) => void }) {
   );
 }
 
+/* ---------- link graph ---------- */
+
+function GraphView({ wiki, nav }: { wiki: string; nav: (v: View) => void }) {
+  const [nodes, setNodes] = useState<GraphNode[]>([]);
+  const [edges, setEdges] = useState<GraphEdge[]>([]);
+  const { err, run } = useErr();
+
+  useEffect(() => {
+    run(async () => {
+      const g = await api.graph(wiki);
+      setNodes(g.nodes || []);
+      setEdges(g.edges || []);
+    });
+  }, [wiki]);
+
+  const byId = useMemo(() => {
+    const m = new Map<number, GraphNode>();
+    nodes.forEach((n) => m.set(n.id, n));
+    return m;
+  }, [nodes]);
+
+  // Adjacency: outgoing targets per node.
+  const adj = useMemo(() => {
+    const m = new Map<number, GraphEdge[]>();
+    for (const e of edges) {
+      if (!m.has(e.from)) m.set(e.from, []);
+      m.get(e.from)!.push(e);
+    }
+    return m;
+  }, [edges]);
+
+  const sorted = useMemo(
+    () => [...nodes].sort((a, b) => b.backlinks - a.backlinks || a.slug.localeCompare(b.slug)),
+    [nodes]
+  );
+
+  return (
+    <section>
+      <Breadcrumbs
+        trail={[
+          { label: "Plato", onClick: () => nav({ name: "projects" }) },
+          { label: wiki, onClick: () => nav({ name: "pages", wiki }) },
+          { label: "graph" },
+        ]}
+      />
+      <div className="page-head">
+        <h2>Link graph</h2>
+        <p className="health">
+          {nodes.length} nodes <span className="dot">·</span> {edges.length} edges
+        </p>
+      </div>
+      {err && <p className="error">{err}</p>}
+      <p className="muted">Sorted by inbound references. Each row lists resolved outgoing links.</p>
+      <ul className="list">
+        {sorted.map((n) => (
+          <li key={n.id} className="graph-node">
+            <div>
+              <a onClick={() => nav({ name: "page", wiki, slug: n.slug })}>{n.title}</a>
+              <span className="counts">
+                <span>{n.outgoing} out</span>
+                <span>{n.backlinks} in</span>
+              </span>
+            </div>
+            {(adj.get(n.id) || []).length > 0 && (
+              <div className="graph-edges">
+                {(adj.get(n.id) || []).map((e, i) => {
+                  const to = byId.get(e.to);
+                  return (
+                    <a
+                      key={i}
+                      className="edge-chip"
+                      onClick={() => to && nav({ name: "page", wiki, slug: to.slug })}
+                      title={`${e.kind} · ${e.origin}`}
+                    >
+                      → {to?.slug ?? e.to}
+                      {e.origin === "manual" && <span className="badge">m</span>}
+                    </a>
+                  );
+                })}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 /* ---------- page viewer ---------- */
 
 function statusClass(status: string) {
@@ -607,15 +700,18 @@ function PageView({ wiki, slug, nav }: { wiki: string; slug: string; nav: (v: Vi
   const [page, setPage] = useState<PageWithContent | null>(null);
   const [outgoing, setOutgoing] = useState<LinkView[]>([]);
   const [backlinks, setBacklinks] = useState<Backlink[]>([]);
+  const [addTo, setAddTo] = useState("");
   const { err, run } = useErr();
 
-  useEffect(() => {
+  const reload = () =>
     run(async () => {
       setPage(await api.getPage(wiki, slug));
       const l = await api.pageLinks(wiki, slug);
       setOutgoing(l.outgoing || []);
       setBacklinks(l.backlinks || []);
     });
+  useEffect(() => {
+    reload();
   }, [wiki, slug]);
 
   if (err) return <p className="error">{err}</p>;
@@ -678,10 +774,44 @@ function PageView({ wiki, slug, nav }: { wiki: string; slug: string; nav: (v: Vi
                   <span>{l.label || l.target}</span>
                 )}
                 {l.status !== "resolved" && <span className="badge">{l.status}</span>}
+                {l.origin === "manual" && <span className="badge" title="added via API/UI">manual</span>}
+                {l.origin === "manual" && (
+                  <a
+                    className="link-remove"
+                    title="Remove this link"
+                    onClick={() =>
+                      run(async () => {
+                        await api.removeLink(wiki, slug, l.raw);
+                        reload();
+                      })
+                    }
+                  >
+                    ✕
+                  </a>
+                )}
               </li>
             ))}
             {outgoing.length === 0 && <li className="muted">none</li>}
           </ul>
+          <div className="add-link">
+            <input
+              placeholder="add link → page slug"
+              value={addTo}
+              onChange={(e) => setAddTo(e.target.value)}
+            />
+            <button
+              disabled={!addTo.trim()}
+              onClick={() =>
+                run(async () => {
+                  await api.addLink(wiki, slug, { to: addTo.trim() });
+                  setAddTo("");
+                  reload();
+                })
+              }
+            >
+              Add
+            </button>
+          </div>
         </div>
         <div>
           <h3>Backlinks ({backlinks.length})</h3>

@@ -51,9 +51,14 @@ func (s *Server) routes() {
 
 	// Links.
 	s.Mux.HandleFunc("GET /api/v1/wikis/{wikiSlug}/pages/{pageSlug}/links", s.require(readScope, s.handlePageLinks))
+	s.Mux.HandleFunc("POST /api/v1/wikis/{wikiSlug}/pages/{pageSlug}/links", s.require(writeScope, s.handleAddLink))
+	s.Mux.HandleFunc("DELETE /api/v1/wikis/{wikiSlug}/pages/{pageSlug}/links", s.require(writeScope, s.handleRemoveLink))
 
 	// Cross-link verification (project-wide integrity report).
 	s.Mux.HandleFunc("GET /api/v1/wikis/{wikiSlug}/verify", s.require(readScope, s.handleVerify))
+
+	// Link graph (nodes + edges) for external agent analysis.
+	s.Mux.HandleFunc("GET /api/v1/wikis/{wikiSlug}/graph", s.require(readScope, s.handleGraph))
 
 	// Sync.
 	s.Mux.HandleFunc("POST /api/v1/wikis/{wikiSlug}/sync", s.require(writeScope, s.handleSync))
